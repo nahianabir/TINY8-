@@ -17,6 +17,7 @@
 #   from a console with that var) and __main__ will print a one-line
 #   banner to stderr and re-raise on unhandled exceptions.
 #
+
 # Spec file:
 #   The repo includes `Tiny8Studio.spec` (a thin wrapper around the same
 #   arguments) so the build is reproducible outside of this workflow.
