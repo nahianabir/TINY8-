@@ -1,0 +1,226 @@
+# ---------------------------------------------------------------------------
+# Tiny8 Studio — Windows executable build
+# ---------------------------------------------------------------------------
+# Builds dist/Tiny8Studio.exe on a Windows GitHub Actions runner using
+# PyInstaller.  The build is reproducible: pinned Python version, pinned
+# PyInstaller version, and explicit entry + paths matching the project
+# layout.
+#
+# Entry point: tools/tiny8_studio/__main__.py
+#   The package is `tiny8_studio` (a sub-package of `tools/`).  We add
+#   `tools/` to `sys.path` via PyInstaller's `--paths` so the import
+#   resolves, and `--collect-submodules` picks up every widget and helper.
+#
+# Windowed mode:
+#   `--noconsole` so the GUI launches without a flashing console window.
+#   Diagnostic mode: set TINY8_STUDIO_DEBUG=1 in the env (or run the .exe
+#   from a console with that var) and __main__ will print a one-line
+#   banner to stderr and re-raise on unhandled exceptions.
+#
+# Spec file:
+#   The repo includes `Tiny8Studio.spec` (a thin wrapper around the same
+#   arguments) so the build is reproducible outside of this workflow.
+#   The workflow uses the spec if it exists, otherwise falls back to the
+#   inline argument set.
+#
+# Trigger: workflow_dispatch (manual run from the Actions tab).
+# ---------------------------------------------------------------------------
+
+name: build-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Python version to build against"
+        required: false
+        default: "3.12"
+        type: choice
+        options:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+      pyinstaller_version:
+        description: "PyInstaller version, or 'from-requirements' to use requirements-build.txt"
+        required: false
+        default: "from-requirements"
+        type: string
+      artifact_name:
+        description: "Output artifact name"
+        required: false
+        default: "Tiny8Studio-Windows-x64"
+        type: string
+
+# Avoid duplicate runs on push/pull_request; this workflow is manual only.
+concurrency:
+  group: build-windows
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Tiny8Studio.exe
+    runs-on: windows-2022
+
+    env:
+      # TINY8_STUDIO_DEBUG is *off* in the built .exe.  Setting it to 1
+      # here would only affect the build-time smoke check below.
+      TINY8_STUDIO_DEBUG: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          # Cache the pip download cache keyed on the lock file.
+          # requirements-build.txt pins PyInstaller; updating it
+          # invalidates the cache automatically.
+          cache: "pip"
+          cache-dependency-path: requirements-build.txt
+
+      - name: Display toolchain versions
+        shell: bash
+        run: |
+          echo "Runner:    $RUNNER_OS $RUNNER_ARCH"
+          python --version
+          python -c "import sys, platform; print('platform:', platform.platform())"
+          python -c "import tkinter; print('tkinter:', tkinter.TkVersion)"
+
+      - name: Install PyInstaller
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ "${{ inputs.pyinstaller_version }}" != "from-requirements" ]; then
+            # Pin a specific version when the user requested one.
+            python -m pip install \
+              "pyinstaller==${{ inputs.pyinstaller_version }}"
+          else
+            python -m pip install -r requirements-build.txt
+          fi
+          python -c "import PyInstaller; print('PyInstaller:', PyInstaller.__version__)"
+
+      - name: Verify project layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f tools/tiny8_studio/__main__.py
+          test -f tools/tiny8_studio/__init__.py
+          test -f tools/tiny8_studio/app.py
+          echo "Layout OK"
+
+      - name: Clean previous build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build dist
+          echo "Cleaned build/ and dist/"
+
+      - name: Build (using Tiny8Studio.spec if present, else inline)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Tiny8Studio.spec ]; then
+            echo "Using Tiny8Studio.spec"
+            pyinstaller \
+              --noconfirm \
+              --clean \
+              Tiny8Studio.spec
+          else
+            echo "No Tiny8Studio.spec found; using inline arguments"
+            pyinstaller \
+              --noconfirm \
+              --clean \
+              --name Tiny8Studio \
+              --onefile \
+              --windowed \
+              --paths tools \
+              --collect-submodules tiny8_studio \
+              --collect-submodules tkinter \
+              --hidden-import tkinter \
+              --hidden-import tkinter.ttk \
+              --hidden-import tkinter.filedialog \
+              --hidden-import tkinter.messagebox \
+              --hidden-import tkinter.simpledialog \
+              tools/tiny8_studio/__main__.py
+          fi
+
+      - name: Verify the executable was produced
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="dist/Tiny8Studio.exe"
+          if [ ! -f "$EXE" ]; then
+            echo "::error::$EXE was not produced"
+            ls -la dist/ || true
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$EXE")
+          echo "Produced: $EXE ($SIZE bytes)"
+
+      - name: Smoke-check the binary (--version)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tiny8Studio.exe --version prints the version and exits 0
+          # without opening the GUI.  If the bundle is corrupt or any
+          # required module failed to import, the .exe will fail to
+          # launch and this step will surface the error.
+          OUT=$(./dist/Tiny8Studio.exe --version 2>&1)
+          echo "$OUT"
+          echo "$OUT" | grep -q "Tiny8Studio" || {
+            echo "::error::--version did not return expected banner"
+            exit 1
+          }
+
+      - name: Collect companion files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/docs
+          # Tiny8Studio ships without Arduino CLI / AVR toolchains.  We
+          # bundle the engine docs so the user has offline reference.
+          for f in README.md docs/BUILD.md docs/PINS.md docs/API.md docs/STUDIO.md; do
+            if [ -f "$f" ]; then
+              cp "$f" "dist/docs/"
+            fi
+          done
+          # A one-line LICENSE pointer for end users.
+          if [ -f LICENSE ]; then
+            cp LICENSE dist/
+          fi
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: |
+            dist/Tiny8Studio.exe
+            dist/docs/
+            dist/LICENSE
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Print artifact summary
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## Build summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Artifact:** \`${{ inputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Python:** ${{ inputs.python_version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **PyInstaller:** ${{ inputs.pyinstaller_version }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f dist/Tiny8Studio.exe ]; then
+            SIZE=$(stat -c %s dist/Tiny8Studio.exe)
+            echo "- **Executable size:** $((SIZE / 1024 / 1024)) MB" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download from the run's **Artifacts** section." >> "$GITHUB_STEP_SUMMARY"
+          echo "Set \`TINY8_STUDIO_DEBUG=1\` and run \`Tiny8Studio.exe\` from a" >> "$GITHUB_STEP_SUMMARY"
+          echo "console for troubleshooting output." >> "$GITHUB_STEP_SUMMARY"

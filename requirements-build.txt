@@ -1,0 +1,11 @@
+# Build-time dependencies for packaging Tiny8 Studio.
+#
+# Used by:
+#   .github/workflows/build-windows.yml
+#   scripts/build_windows.bat (local Windows build)
+#
+# Runtime dependencies of the studio itself are *not* listed here; the
+# studio only uses the Python standard library.  Pillow is optional and
+# installed by the user, not by the build.
+
+pyinstaller==6.10.0
